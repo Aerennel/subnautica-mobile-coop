@@ -111,3 +111,18 @@ dotnet Il2CppDumper.dll /home/agentuser/base_extracted/lib/arm64-v8a/libil2cpp.s
 - SHA-256 сертификата одинаковый у всех трёх: 514733c5...
 - Итоговый пакет: mod/snmp_patched.apks (~1.8GB), внутри base.apk+2 сплита. libsnmp.so внутри base подтверждена.
 - Установка: mod/INSTALL.md (SAI, бэкап saves, откат).
+
+## A5 v2 — переработка после краша worker+148 [НЕ ПРОВЕРЕНО НА УСТРОЙСТВЕ]
+- Диагноз по logcat пользователя: native crash #03 libsnmp.so (worker+148=0x1d34 blr x8 -> il2cpp_domain_get),
+  #01/#02 внутри libil2cpp. Причина: il2cpp_domain_get() вызван из СВОЕГО pthread до/вне Unity main thread ->
+  рантайм лезет в thread-local, падает. Поллинг домена из pthread принципиально небезопасен.
+- Решение: убрать pthread полностью. Inline-hook il2cpp_init (вызывается ОДИН раз на Unity main thread,
+  домен уже создан) -> там резолвим классы, show_message("loader alive"), ставим hook Player.Update.
+  Периодический вывод координат — внутри Player.Update hook (тоже main thread) раз в 5с (time(NULL)).
+- Хукер: relocating ARM64 trampoline (16 stolen bytes), обрабатывает adrp/adr/bl/b/cbz/cbnz/tbz/tbnz/ldr-literal
+  (материализация абсолютного адреса movz/movk, т.к. в прологах il2cpp_init и Player.Update есть adrp/bl).
+  Прыжок на replacement: LDR X16,#8; BR X16; .quad addr. mprotect RWX на время записи.
+- il2cpp_init RVA 0x25b3bec (экспорт). Player.Update находим по имени, code ptr = *(void**)MethodInfo (methodPointer).
+- boxed Vector3 = object+16 [ПРЕДПОЛОЖЕНИЕ, проверить].
+- Порядок: loadLibrary("snmp") в onCreate идёт ДО new UnityPlayerForActivityOrService -> hook il2cpp_init успевает.
+- try/catch вокруг loadLibrary в smali оставлен (если .so не грузится — игра всё равно стартует, лог SNMP loadLibrary FAILED).
