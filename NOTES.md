@@ -167,3 +167,55 @@ dotnet Il2CppDumper.dll /home/agentuser/base_extracted/lib/arm64-v8a/libil2cpp.s
 - Menu.* / CrashHandler.* оставлены в дереве, но не вызываются (Main.Start* no-op, ServiceStart убран).
 - Сборка OK, подпись тем же ключом. base.apk обновлён в релизе hello-world-v1 (62349258 b).
 - Ожидание: плашка Integrity Error и Toast PDALIFE должны исчезнуть; наш hello-world (il2cpp_init + Player.Update) остаётся.
+
+## HELLO-WORLD ПРИНЯТ (сессия 5, 2026-11-18) ✅
+На устройстве подтверждено: `[SNMP] pos X Y Z` выводится на экран раз в 5 сек, координаты живые.
+Полная рабочая цепочка hello-world (v7):
+- smali UnityPlayerActivity.onCreate -> System.loadLibrary("snmp") (try/catch, .locals 3).
+- libsnmp.so (constructor) -> DobbyHook на РЕАЛЬНОЕ ТЕЛО il2cpp_runtime_invoke (RVA 0x260c8a4, НЕ thunk-export 0x25b4634).
+- Первый вызов runtime_invoke -> il2cpp_domain_get() -> DobbyHook Player.Update (RVA 0x2ab8aa0).
+- Player_Update_hook -> find_class() перебором образов -> Player.main (static field) -> get_transform -> get_position -> ErrorMessage.AddMessage.
+
+## КРИТИЧЕСКИЕ УРОКИ IL2CPP API (этот билд, Unity 6000.0.78f1, metadata v31)
+1. il2cpp_class_from_name(NULL, ns, name) = SEGV (читает [NULL+0x30]). image ОБЯЗАТЕЛЕН.
+   Правильно: il2cpp_domain_get_assemblies(domain,&count) -> il2cpp_assembly_get_image(asm) -> class_from_name(image,...).
+2. il2cpp_class_get_static_field НЕ СУЩЕСТВУЕТ (dlsym=NULL -> pc 0x0).
+   Static field читается: il2cpp_class_get_field_from_name(klass,"main") -> il2cpp_field_static_get_value(field,&out).
+3. Экспортируемые il2cpp_* — часто thunk (b <real>). Для DobbyHook брать РЕАЛЬНОЕ тело по целевому RVA, не export-thunk.
+4. Dobby = рабочий hook-движок (проверен qemu smoke-test). Самописный trampoline НЕЛЬЗЯ (не релокейтит bl -> SIGBUS pc=0xcd).
+   ShadowHook на Android 17 НЕ работает (init rc=12 linker mod failed).
+5. Линковка: clang(C) -> snmp.o, затем clang++ -shared -static-libstdc++ + libdobby.a (C++ runtime иначе __cxa_pure_virtual).
+
+## Dobby — локальные правки (~/Dobby, master 5dfc854 сломан, чинили)
+- common/os_arch_features.h: убрана зависимость от base::OSMemory (циклич. include), make_memory_readable через mprotect напрямую.
+- code-patch-tool-posix.cc: убран #include "core/arch/Cpu.h" (нет в master).
+- ProcessRuntime.cc: MemRange a.start -> a.start(); load_address -> base.
+- SymbolResolver/elf/dobby_symbol_resolver.cc: load_address -> base.
+- closure_bridge_arm64.asm: @PAGE/@PAGEOFF -> :lo12:/GOT для PIC.
+- Сборка: cmake android toolchain NDK r26c, arm64-v8a, android-29, Release. libdobby.a ~1.3MB.
+
+## Рабочие RVA (versionCode 83811)
+- il2cpp_runtime_invoke ТЕЛО: 0x260c8a4 (export-thunk 0x25b4634).
+- Player.Update: 0x2ab8aa0. Player.main = static field 0x8 (dump.cs class Player TypeDefIndex 1503).
+- Transform.get_position: 0x52076A0 (icall, дергается через runtime_invoke OK).
+- ErrorMessage.AddMessage: 0x297CF68.
+
+## Команды сборки (воспроизведение)
+source /home/agentuser/mod_env.sh   # JAVA_HOME, PATH, APKTOOL=java -jar apktool.jar
+# keystore: mod/snmp.keystore alias snmp, store/key pass snmpmod123 (ОДИН для base+сплитов)
+NDK=/home/agentuser/android-ndk-r26c/toolchains/llvm/prebuilt/linux-x86_64/bin
+$NDK/aarch64-linux-android34-clang -fPIC -O2 -c -I~/Dobby/include snmp.c -o snmp.o
+$NDK/aarch64-linux-android34-clang++ -shared -static-libstdc++ snmp.o ~/Dobby/build_static/libdobby.a -llog -ldl -o libsnmp.so
+cp libsnmp.so base_smali/lib/arm64-v8a/
+java -jar ~/apktool.jar b base_smali -o out/base.apk
+zipalign -f 4 out/base.apk out/b.apk && mv out/b.apk out/base.apk
+apksigner sign --ks snmp.keystore --ks-pass pass:snmpmod123 --key-pass pass:snmpmod123 out/base.apk
+gh release upload hello-world-v1 out/base.apk --clobber --repo Aerennel/subnautica-mobile-coop
+
+## Smoke-test без телефона (qemu-user)
+qemu-aarch64 + статический ARM64 бинарь с libdobby.a + заглушка __android_log_vprint.
+Проверяет DobbyHook + trampoline + вызов orig БЕЗ установки игры. mod/smoke_test.c.
+Полноценную Unity/Vulkan игру без KVM не запустить — только финальный тест на устройстве.
+
+## СТОП-линия
+Hello-world (A–C) принят. Мультиплеер НЕ реализован и не начат — ждёт явной команды юзера.

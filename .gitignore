@@ -8,3 +8,7 @@ out/
 *.pkl
 tunnel.log
 libsnmp.so
+snmp.o
+smoke_test
+smoke_test_static
+*.bak
