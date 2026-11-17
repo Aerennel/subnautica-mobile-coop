@@ -1,0 +1,10 @@
+*.apks
+*.apk
+*.idsig
+*.keystore
+base_smali/
+base_decoded/
+out/
+*.pkl
+tunnel.log
+libsnmp.so
