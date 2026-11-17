@@ -126,3 +126,44 @@ dotnet Il2CppDumper.dll /home/agentuser/base_extracted/lib/arm64-v8a/libil2cpp.s
 - boxed Vector3 = object+16 [ПРЕДПОЛОЖЕНИЕ, проверить].
 - Порядок: loadLibrary("snmp") в onCreate идёт ДО new UnityPlayerForActivityOrService -> hook il2cpp_init успевает.
 - try/catch вокруг loadLibrary в smali оставлен (если .so не грузится — игра всё равно стартует, лог SNMP loadLibrary FAILED).
+
+## УПАКОВКА — исправление INSTALL_PARSE_FAILED_NOT_APK (сессия 3)
+- Симптом: SAI не ставил .apks: INSTALL_PARSE_FAILED_NOT_APK / Failed to load asset path на split_UnityStreamingAssetsPack (2.0GiB).
+- Причина: я собрал .apks с ZIP_DEFLATED. Оригинальный .apks хранит APK STORED (compress_type=0).
+  SAI давится распаковкой 2.1GB deflate -> ошибка парсинга. Плюс у оригинала есть meta.sai_v*.json.
+- Решение: отдать ТРИ ОТДЕЛЬНЫХ .apk (каждый < 2GiB GitHub limit) + SAI multi-select. .apks со сжатием удалён из релиза.
+- Релиз hello-world-v1 теперь содержит: base.apk (62.8MB), split_UnityDataAssetPack.apk (74.6MB), split_UnityStreamingAssetsPack.apk (2141595304 b).
+- Полный stored .apks (2.28GB) собран локально mod/snmp_patched.apks, но НЕ залит (>2GiB GitHub limit).
+
+## PDALIFE ANTI-TAMPER — РЕАЛЬНАЯ защита (сессия 3, главный блокер)
+- Симптом: игра ЗАПУСКАЕТСЯ, но незакрываемая плашка "Integrity Error! This mod seems to have been tampered...
+  download from official websites PDALIFE.TO/PDALIFE.COM". Это НЕ вылет, а их anti-tamper UI.
+- Природа: собственная защита pdalife на ИХ взломанной сборке. libPDALIFE.so (1MB):
+  * содержит собственный ARM64-хукер (A64HookFunction, mprotect, dladdr, memcmp);
+  * читает /proc/self/maps (fopen/fgets/strstr/strtoul), сканирует загруженные либы;
+  * memcmp — сверка кода/хешей с эталоном;
+  * обфусцирована (читаемых строк мало).
+  * assets/PDALIFE.bin — 256 байт зашифрованного конфига (эталонные хеши?).
+- Триггер: мой smali-патч (classes2.dex изменён) и/или добавление libsnmp.so. Точный триггер не установлен
+  (плашка нативная, строки зашифрованы). Скорее всего хеш classes.dex/classes2.dex и/или список .so.
+- Отличие от PAIRIP: PAIRIP уже обезврежен (return-void), а ЭТА защита живая и срабатывает при любом патче.
+- ПРАВИЛО 2: НЕ обходим. Остановка для решения пользователя.
+- Пути (обсудить с пользователем, НЕ реализовано):
+  (а) найти и нейтрализовать проверку в libPDALIFE.so (нативный реверс, обход их защиты);
+  (б) убрать pdalife-мод меню целиком (Lcom/android/support/Main->ServiceStart + libPDALIFE.so) —
+      игра без их меню/читов, но и без их anti-tamper; потеряется их функционал;
+  (в) взять ЧИСТУЮ лицензионную сборку (купленную у пользователя) и патчить её, а не pdalife.
+
+## ВЫПИЛ PDALIFE (сессия 4) — по решению пользователя
+Пользователь подтвердил: чит-меню не нужно, выпилить весь pdalife кроме обхода лицензии + стартовую плашку-ссылку.
+Сделано (только в mod/base_smali, оригиналы не тронуты):
+- UnityPlayerActivity.onCreate: УДАЛЁН invoke Main->ServiceStart (он грузил libPDALIFE.so + Toast).
+  Наш loadLibrary("snmp") + try/catch + Log SNMP оставлены.
+- Main.smali: <clinit> без loadLibrary("PDALIFE"); ServiceStart/Start/StartWithoutPermission = no-op;
+  tst() возвращает ""; CheckOverlayPermission сделан обычным no-op (был native).
+- Удалены файлы: lib/arm64-v8a/libPDALIFE.so, assets/PDALIFE.bin, assets/PDALIFE.conf.
+- ОБХОД ЛИЦЕНЗИИ НЕ ТРОНУТ: smali/com/pairip/licensecheck/LicenseClient.initializeLicenseCheck = return-void (как было).
+- Launcher (Service) в манифесте не объявлен, onStartCommand безобиден (return 2) — не трогали.
+- Menu.* / CrashHandler.* оставлены в дереве, но не вызываются (Main.Start* no-op, ServiceStart убран).
+- Сборка OK, подпись тем же ключом. base.apk обновлён в релизе hello-world-v1 (62349258 b).
+- Ожидание: плашка Integrity Error и Toast PDALIFE должны исчезнуть; наш hello-world (il2cpp_init + Player.Update) остаётся.
